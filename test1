@@ -1,0 +1,574 @@
+from abaqus import *
+from abaqusConstants import *
+from caeModules import *
+import math
+Mdb()
+​
+#创建窗口和工件
+myModel=mdb.Model(name='milling')
+s1 = mdb.models['milling'].ConstrainedSketch(name='__profile__', 
+    sheetSize=200.0)
+g, v, d, c = s1.geometry, s1.vertices, s1.dimensions, s1.constraints
+s1.setPrimaryObject(option=STANDALONE)
+s1.rectangle(point1=(0.0,0.0), point2=(50.0,200.0))
+p = mdb.models['milling'].Part(name='workpiece', dimensionality=THREE_D, 
+    type=DEFORMABLE_BODY)
+p = mdb.models['milling'].parts['workpiece']
+p.BaseSolidExtrude(sketch=s1, depth=20.0)
+s1.unsetPrimaryObject()
+p = mdb.models['milling'].parts['workpiece']
+session.viewports['Viewport: 1'].setValues(displayedObject=p)
+del mdb.models['milling'].sketches['__profile__']
+​
+​
+#设置材料属性
+p = mdb.models['milling'].parts['workpiece']
+session.viewports['Viewport: 1'].setValues(displayedObject=p)
+mymaterial=mdb.models['milling'].Material(name='T16AL4V')
+mymaterial.Density(table=((2.83E-009, ), ))
+mymaterial.Elastic(table=((71700, 0.33),))
+​
+​
+#分配截面属性
+mdb.models['milling'].HomogeneousSolidSection(name='Section-1',
+          material='T16AL4V', thickness=None)
+p = mdb.models['milling'].parts['workpiece']
+c = p.cells
+region = p.Set(cells=c, name='Set-1')
+p = mdb.models['milling'].parts['workpiece']
+p.SectionAssignment(region=region, sectionName='Section-1', offset=0.0, 
+    offsetType=MIDDLE_SURFACE, offsetField='', 
+    thicknessAssignment=FROM_SECTION)
+​
+​
+#划分网格
+session.viewports['Viewport: 1'].partDisplay.geometryOptions.setValues(
+    referenceRepresentation=OFF)
+a = mdb.models['milling'].parts['workpiece']
+a.seedPart(size=1.0, deviationFactor=0.1, minSizeFactor=0.1)
+a.generateMesh()
+​
+​
+#装配
+a = mdb.models['milling'].rootAssembly
+session.viewports['Viewport: 1'].setValues(displayedObject=a)
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(mesh=OFF)
+session.viewports['Viewport: 1'].assemblyDisplay.meshOptions.setValues(
+    meshTechnique=OFF, seeds=OFF)
+a1 = mdb.models['milling'].rootAssembly
+a1.DatumCsysByDefault(CARTESIAN)
+p = mdb.models['milling'].parts['workpiece']
+a1.Instance(name='workpiece-1', part=p, dependent=ON)
+
+
+
+
+# ​---------------------------------------------------------
+#  1 完全约束底面少量点（常为中心线被约束），在边上施加弹簧约束，去除若干槽，获得变形力大小，存入csv文件。
+# ---------------------------------------------------------
+
+
+
+
+#建立工件底部nodeset，用作提取节点应力 
+def createNodesets(b,xmin,xmax,ymin,ymax,zmin,zmax,setname):
+    a=mdb.models['milling'].parts['workpiece']
+    n=a.nodes
+    pickednodes=n.getByBoundingBox(xMin=xmin-b,xMax=xmax+b,yMin=ymin,
+                yMax=ymax,zMin=zmin-b,zMax=zmax+b)
+    nodeset=a.Set(name=setname,nodes=pickednodes)
+    return nodeset
+if __name__=='__main__':
+    createNodesets(0.1,25,25,0,200,0,0,'nodeset') 
+
+    
+#BC constrain 在底部建一个槽的nodeset用作BC,限制工件刚性位移
+if __name__=='__main__':
+    createNodesets(0.1,5,45,100,100,0,1,'BCnodeset')
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['BCnodeset']    
+mdb.models['milling'].DisplacementBC(name='BC-1',createStepName='Initial',
+          region=region,u1=SET,u2=SET,u3=SET,ur1=SET,ur2=SET,ur3=SET,
+        amplitude=UNSET,distributionType=UNIFORM,fieldName='',
+        localCsys=None)
+        
+        
+#建立step分析步
+mdb.models['milling'].StaticStep(name='Step-1',previous='Initial')
+
+
+#底部加弹簧
+def springnodeset(x,y,z,setname):
+    a=mdb.models['milling'].parts['workpiece']
+    n=a.nodes
+    b=0.5
+    pickednodes=n.getByBoundingBox(xMin=x-b,xMax=x+b,yMin=y-b,
+                yMax=y+b,zMin=z-b,zMax=z+b)
+    nodeset=a.Set(name=setname,nodes=pickednodes)
+    return nodeset
+t=10
+springnodeset(10,10,0,'set1')
+springnodeset(10,70,0,'set2')
+springnodeset(10,130,0,'set3')
+springnodeset(10,190,0,'set4')
+springnodeset(25,50,0,'set5')
+springnodeset(25,150,0,'set6')
+springnodeset(40,10,0,'set7')
+springnodeset(40,70,0,'set8')
+springnodeset(40,130,0,'set9')
+springnodeset(40,190,0,'set10')
+
+
+#以Y轴分层建立20个elementset,用作施加初始残余应力
+def createElementsets(xmin,xmax,ymin,ymax,zmin,zmax,setname):
+    a=mdb.models['milling'].parts['workpiece']
+    e=a.elements
+    el=e.getByBoundingBox(xMin=xmin,xMax=xmax,yMin=ymin,yMax=ymax,
+                          zMin=zmin,zMax=zmax)
+    elementset=a.Set(name=setname,elements=el)
+    return elementset
+def createsumlayers(b,xmin,xmax,ymin,ymax,zstart,zend,layersum):
+    l=abs(zend-zstart)/layersum
+    print (l)
+    for i in range(layersum):
+        zmin=zstart+l*i-b
+        zmax=zmin+l+2*b
+        print (zmin,zmax)
+        createElementsets(xmin,xmax,ymin,ymax,zmin,zmax,'elementset-'+str(i+1))
+if __name__=='__main__':
+    createsumlayers(0.1,0,50,0,200,0,20,20) 
+
+    
+​#以Y轴建立2个薄壁5mm，底部厚度10mm的框的elementset，作为整体，用作model change    
+if __name__=='__main__':        
+    createElementsets(5,45,5,95,2,20,'modelchangeset1') 
+    createElementsets(5,45,105,195,2,20,'modelchangeset2')
+    
+
+##残余应力的自动生成
+import csv
+def getInitialResidualStress(Height):
+    layersNum = int(Height)
+    stress_X = [ ]
+    stress_Y = [ ]
+    sizeScale = 60.0/Height
+    for i in range(0,layersNum):
+        z = (i+1-(Height+1)/2)*sizeScale
+        x = 70.74 - 71.51*math.exp(-0.00393*z**2) - 90.63*math.exp(-0.017*(z+23.18)**2)-90.63*math.exp(-0.017*(z-23.18)**2)
+        y = 2.76 - 17.02*math.exp(-0.0487*(z+26.34)**2)-17.02*math.exp(-0.0487*(z-26.34)**2)+4.944*math.exp(-0.0367*(z+12.01)**2)+4.944*math.exp(-0.0367*(z-12.01)**2)
+        stress_X.append(x)
+        stress_Y.append(y)
+    csvStress = open('D:/SIMULIA/InitialResidualStress1.csv','wb')    ########
+    writer = csv.writer(csvStress)
+    writer.writerow(stress_X)
+    writer.writerow(stress_Y)
+    csvStress.close()
+    return stress_X,stress_Y 
+
+    
+#load残余应力分层施加
+stress_X,stress_Y = getInitialResidualStress(20)
+a = mdb.models['milling'].rootAssembly
+for i in range(len(stress_X)):
+    region = a.instances['workpiece-1'].sets['elementset-'+str(i+1)]
+    mdb.models['milling'].Stress(name='residualStress-'+str(i+1),region=region,
+              distributionType=UNIFORM, sigma11=stress_X[i],sigma22=stress_Y[i],
+              sigma33=0.0, sigma12=0.0, sigma13=0.0,sigma23=0.0)
+              
+              
+#interaction整体生死单元             
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(step='Step-1')
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(interactions=ON, 
+    constraints=ON, connectors=ON, engineeringFeatures=ON, 
+    adaptiveMeshConstraints=OFF)
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['modelchangeset1']
+mdb.models['milling'].ModelChange(name='Int-1', createStepName='Step-1', 
+    region=region, regionType=ELEMENTS, activeInStep=False, 
+    includeStrain=False)
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['modelchangeset2']
+mdb.models['milling'].ModelChange(name='Int-2', createStepName='Step-1', 
+    region=region, regionType=ELEMENTS, activeInStep=False, 
+    includeStrain=False)
+    
+    
+#提交job分析
+print('job is started')
+mdb.Job(name='2kuang-fuban2-1', model='milling', description='', type=ANALYSIS, 
+    atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90, 
+    memoryUnits=PERCENTAGE, getMemoryFromAnalysis=True, 
+    explicitPrecision=SINGLE, nodalOutputPrecision=SINGLE, echoPrint=OFF, 
+    modelPrint=OFF, contactPrint=OFF, historyPrint=OFF, userSubroutine='', 
+    numCpus=16,numDomains=16, numGPUs=2)
+mdb.jobs['2kuang-fuban2-1'].submit(consistencyChecking=OFF)
+mdb.jobs['2kuang-fuban2-1'].waitForCompletion()
+print('job is done')
+
+
+#提取弹簧力
+print("The force is saving")
+import csv 
+from odbAccess import* 
+odb=openOdb(path='2kuang-fuban2-1.odb')
+for i in range(t):
+   springregion=odb.rootAssembly.elementSets['SPRINGS-'+str(i+1)+'-SPRING']
+   odb=openOdb(path='2kuang-fuban2-1.odb')
+   lastFrame=odb.steps['Step-1'].frames[-1]
+   force=lastFrame.fieldOutputs['E']
+   springforce=force.getSubset(region=springregion)
+   springValues=springforce.values
+   x=[]
+   x.append(springValues[0].data[0])
+   # append() 方法向列表的尾部添加一个新的元素
+   csvfile=open('D:/SIMULIA/2kuang-fuban2-1.csv','a')
+   #追加写入，不会覆盖
+   writer = csv.writer(csvfile)
+#    title = ['E']
+#    writer.writerow(title)
+   #for v in centerValues:
+   writer.writerow(x)
+   csvfile.close()
+print("The force have been saved")
+
+
+
+# --------------------------------------------------------------------
+#  2.完全约束底面少量点（常为中心线被约束） 去除若干槽，获得底面变形数据，存入csv文件 
+# --------------------------------------------------------------------
+
+
+
+
+
+#建立工件底部nodeset，用作提取节点应力 
+def createNodesets(b,xmin,xmax,ymin,ymax,zmin,zmax,setname):
+    a=mdb.models['milling'].parts['workpiece']
+    n=a.nodes
+    pickednodes=n.getByBoundingBox(xMin=xmin-b,xMax=xmax+b,yMin=ymin,
+                yMax=ymax,zMin=zmin-b,zMax=zmax+b)
+    nodeset=a.Set(name=setname,nodes=pickednodes)
+    return nodeset
+if __name__=='__main__':
+    createNodesets(0.1,25,25,0,200,0,0,'nodeset') 
+
+    
+#BC constrain 在底部建一个槽的nodeset用作BC,限制工件刚性位移
+if __name__=='__main__':
+    createNodesets(0.1,5,45,100,100,0,1,'BCnodeset')
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['BCnodeset']    
+mdb.models['milling'].DisplacementBC(name='BC-1',createStepName='Initial',
+          region=region,u1=SET,u2=SET,u3=SET,ur1=SET,ur2=SET,ur3=SET,
+        amplitude=UNSET,distributionType=UNIFORM,fieldName='',
+        localCsys=None)
+        
+        
+#建立step分析步
+mdb.models['milling'].StaticStep(name='Step-1',previous='Initial')
+
+
+#以Y轴分层建立20个elementset,用作施加初始残余应力
+def createElementsets(xmin,xmax,ymin,ymax,zmin,zmax,setname):
+    a=mdb.models['milling'].parts['workpiece']
+    e=a.elements
+    el=e.getByBoundingBox(xMin=xmin,xMax=xmax,yMin=ymin,yMax=ymax,
+                          zMin=zmin,zMax=zmax)
+    elementset=a.Set(name=setname,elements=el)
+    return elementset
+def createsumlayers(b,xmin,xmax,ymin,ymax,zstart,zend,layersum):
+    l=abs(zend-zstart)/layersum
+    print (l)
+    for i in range(layersum):
+        zmin=zstart+l*i-b
+        zmax=zmin+l+2*b
+        print (zmin,zmax)
+        createElementsets(xmin,xmax,ymin,ymax,zmin,zmax,'elementset-'+str(i+1))
+if __name__=='__main__':
+    createsumlayers(0.1,0,50,0,200,0,20,20)
+
+    
+​#以Y轴建立2个薄壁5mm，底部厚度10mm的框的elementset，作为整体，用作model change    
+if __name__=='__main__':        
+    createElementsets(5,195,5,397.5,2,20,'modelchangeset1') 
+    createElementsets(5,195,402.5,795,2,20,'modelchangeset2')
+    
+    
+##残余应力的自动生成
+import csv
+def getInitialResidualStress(Height):
+    layersNum = int(Height)
+    stress_X = [ ]
+    stress_Y = [ ]
+    sizeScale = 60.0/Height
+    for i in range(0,layersNum):
+        z = (i+1-(Height+1)/2)*sizeScale
+        x = 70.74 - 71.51*math.exp(-0.00393*z**2) - 90.63*math.exp(-0.017*(z+23.18)**2)-90.63*math.exp(-0.017*(z-23.18)**2)
+        y = 2.76 - 17.02*math.exp(-0.0487*(z+26.34)**2)-17.02*math.exp(-0.0487*(z-26.34)**2)+4.944*math.exp(-0.0367*(z+12.01)**2)+4.944*math.exp(-0.0367*(z-12.01)**2)
+        stress_X.append(x)
+        stress_Y.append(y)
+    csvStress = open('D:/SIMULIA/InitialResidualStress2.csv','wb')    ########
+    writer = csv.writer(csvStress)
+    writer.writerow(stress_X)
+    writer.writerow(stress_Y)
+    csvStress.close()
+    return stress_X,stress_Y  
+
+    
+#load残余应力分层施加
+stress_X,stress_Y = getInitialResidualStress(20)
+a = mdb.models['milling'].rootAssembly
+for i in range(len(stress_X)):
+    region = a.instances['workpiece-1'].sets['elementset-'+str(i+1)]
+    mdb.models['milling'].Stress(name='residualStress-'+str(i+1),region=region,
+              distributionType=UNIFORM, sigma11=stress_X[i],sigma22=stress_Y[i],
+              sigma33=0.0, sigma12=0.0, sigma13=0.0,sigma23=0.0)
+              
+              
+#interaction整体生死单元
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(step='Step-1')
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(interactions=ON, 
+    constraints=ON, connectors=ON, engineeringFeatures=ON, 
+    adaptiveMeshConstraints=OFF)
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['modelchangeset1']
+mdb.models['milling'].ModelChange(name='Int-1', createStepName='Step-1', 
+    region=region, regionType=ELEMENTS, activeInStep=False, 
+    includeStrain=False)
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['modelchangeset2']
+mdb.models['milling'].ModelChange(name='Int-2', createStepName='Step-1', 
+    region=region, regionType=ELEMENTS, activeInStep=False, 
+    includeStrain=False)
+    
+    
+#提交job分析
+print('job is started')
+mdb.Job(name='2kuang-fuban2-2', model='milling', description='', type=ANALYSIS, 
+    atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90, 
+    memoryUnits=PERCENTAGE, getMemoryFromAnalysis=True, 
+    explicitPrecision=SINGLE, nodalOutputPrecision=SINGLE, echoPrint=OFF, 
+    modelPrint=OFF, contactPrint=OFF, historyPrint=OFF, userSubroutine='', 
+    numCpus=16,numDomains=16, numGPUs=2)
+mdb.jobs['2kuang-fuban2-2'].submit(consistencyChecking=OFF)
+mdb.jobs['2kuang-fuban2-2'].waitForCompletion()
+print('job is done')
+
+
+import csv 
+from odbAccess import* 
+#csv文件格式是一种通用的电子表格和数据库导入导出格式    下列为提取变形数据
+odb=openOdb(path='2kuang-fuban2-2.odb')
+careregion=odb.rootAssembly.instances['WORKPIECE-1'].nodeSets['NODESET']
+#要大写！
+lastFrame=odb.steps['Step-1'].frames[-1]
+displacement=lastFrame.fieldOutputs['U']
+careDisplacement=displacement.getSubset(region=careregion)
+centerValues=careDisplacement.values
+x=[]
+y=[]
+z=[]
+num=[]
+for v in centerValues:
+    num.append(v.nodeLabel)
+    x.append(v.data[0])# 0 1 2 分别为x y z 方向变形值
+    y.append(v.data[1])
+    z.append(v.data[2])
+csvfile=open('D:/SIMULIA/2kuang-fuban2-2.csv','wb')
+writer = csv.writer(csvfile)
+title = ['Lable','X','Y','Z']
+#title.append('UX-')
+writer.writerow(title)
+#for v in centerValues:
+writer.writerow(num)
+writer.writerow(x)
+writer.writerow(y)
+writer.writerow(z)
+csvfile.close()
+print ('The displacement have been saved')
+
+
+
+
+
+# -----------------------------------------------------------------
+# 3 完全约束底面少量点 在1中弹簧施加出 施加变形力 获得底面变形 并与2进行比较
+# -----------------------------------------------------------------
+
+
+
+
+#建立工件底部nodeset，用作提取节点应力 
+def createNodesets(b,xmin,xmax,ymin,ymax,zmin,zmax,setname):
+    a=mdb.models['milling'].parts['workpiece']
+    n=a.nodes
+    pickednodes=n.getByBoundingBox(xMin=xmin-b,xMax=xmax+b,yMin=ymin,
+                yMax=ymax,zMin=zmin-b,zMax=zmax+b)
+    nodeset=a.Set(name=setname,nodes=pickednodes)
+    return nodeset
+if __name__=='__main__':
+    createNodesets(0.1,25,25,0,200,0,0,'nodeset')
+
+    
+#BC constrain 在底部建一个槽的nodeset用作BC,限制工件刚性位移
+if __name__=='__main__':
+    createNodesets(0.1,5,45,100,100,0,1,'BCnodeset')
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['BCnodeset']    
+mdb.models['milling'].DisplacementBC(name='BC-1',createStepName='Initial',
+          region=region,u1=SET,u2=SET,u3=SET,ur1=SET,ur2=SET,ur3=SET,
+        amplitude=UNSET,distributionType=UNIFORM,fieldName='',
+        localCsys=None)
+        
+        
+#建立step分析步
+mdb.models['milling'].StaticStep(name='Step-1',previous='Initial')
+
+
+#***??
+for i in range(t):
+    a = mdb.models['milling'].rootAssembly
+    region = a.instances['workpiece-1'].sets['set'+str(i+1)]
+    mdb.models['milling'].rootAssembly.engineeringFeatures.SpringDashpotToGround(
+            name='Springs-'+str(i+1), region=region, orientation=None, dof=3, 
+            springBehavior=ON, springStiffness=5000000.0, dashpotBehavior=OFF, 
+            dashpotCoefficient=0.0)
+#***           
+#把测得的力加在弹簧点处
+#读取存储力的csv文件
+import csv
+forces=[]
+csvfile=open('D:/SIMULIA/2kuang-fuban2-1.csv','r')
+reader=csv.reader(csvfile)
+for item in reader:
+   print (item)
+   forces.append(item) 
+csvfile.close()
+for i in range(t):
+   a = mdb.models['milling'].rootAssembly
+   region = a.instances['workpiece-1'].sets['set'+str(i+1)]
+   s=forces[i][2]
+   mdb.models['milling'].ConcentratedForce(name='Load-'+str(i+1), createStepName='Step-1', 
+            region=region, cf3=float(s), distributionType=UNIFORM, field='', 
+            localCsys=None) 
+            
+            
+#以Y轴分层建立20个elementset,用作施加初始残余应力
+def createElementsets(xmin,xmax,ymin,ymax,zmin,zmax,setname):
+    a=mdb.models['milling'].parts['workpiece']
+    e=a.elements
+    el=e.getByBoundingBox(xMin=xmin,xMax=xmax,yMin=ymin,yMax=ymax,
+                          zMin=zmin,zMax=zmax)
+    elementset=a.Set(name=setname,elements=el)
+    return elementset
+def createsumlayers(b,xmin,xmax,ymin,ymax,zstart,zend,layersum):
+    l=abs(zend-zstart)/layersum
+    print (l)
+    for i in range(layersum):
+        zmin=zstart+l*i-b
+        zmax=zmin+l+2*b
+        print (zmin,zmax)
+        createElementsets(xmin,xmax,ymin,ymax,zmin,zmax,'elementset-'+str(i+1))
+if __name__=='__main__':
+    createsumlayers(0.1,0,50,0,200,0,20,20)
+
+    
+​#以Y轴建立2个薄壁5mm，底部厚度10mm的框的elementset，作为整体，用作model change    
+if __name__=='__main__':        
+    createElementsets(5,195,5,397.5,2,20,'modelchangeset1') 
+    createElementsets(5,195,402.5,795,2,20,'modelchangeset2')
+    
+    
+##残余应力的自动生成
+import csv
+def getInitialResidualStress(Height):
+    layersNum = int(Height)
+    stress_X = [ ]
+    stress_Y = [ ]
+    sizeScale = 60.0/Height
+    for i in range(0,layersNum):
+        z = (i+1-(Height+1)/2)*sizeScale
+        x = 70.74 - 71.51*math.exp(-0.00393*z**2) - 90.63*math.exp(-0.017*(z+23.18)**2)-90.63*math.exp(-0.017*(z-23.18)**2)
+        y = 2.76 - 17.02*math.exp(-0.0487*(z+26.34)**2)-17.02*math.exp(-0.0487*(z-26.34)**2)+4.944*math.exp(-0.0367*(z+12.01)**2)+4.944*math.exp(-0.0367*(z-12.01)**2)
+        stress_X.append(x)
+        stress_Y.append(y)
+    csvStress = open('D:/SIMULIA/InitialResidualStress2.csv','wb')    
+    writer = csv.writer(csvStress)
+    writer.writerow(stress_X)
+    writer.writerow(stress_Y)
+    csvStress.close()
+    return stress_X,stress_Y 
+
+    
+#load残余应力分层施加
+stress_X,stress_Y = getInitialResidualStress(20)
+a = mdb.models['milling'].rootAssembly
+for i in range(len(stress_X)):
+    region = a.instances['workpiece-1'].sets['elementset-'+str(i+1)]
+    mdb.models['milling'].Stress(name='residualStress-'+str(i+1),region=region,
+              distributionType=UNIFORM, sigma11=stress_X[i],sigma22=stress_Y[i],
+              sigma33=0.0, sigma12=0.0, sigma13=0.0,sigma23=0.0)
+
+              
+#interaction整体生死单元
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(step='Step-1')
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(interactions=ON, 
+    constraints=ON, connectors=ON, engineeringFeatures=ON, 
+    adaptiveMeshConstraints=OFF)
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['modelchangeset1']
+mdb.models['milling'].ModelChange(name='Int-1', createStepName='Step-1', 
+    region=region, regionType=ELEMENTS, activeInStep=False, 
+    includeStrain=False)
+a = mdb.models['milling'].rootAssembly
+region =a.instances['workpiece-1'].sets['modelchangeset2']
+mdb.models['milling'].ModelChange(name='Int-2', createStepName='Step-1', 
+    region=region, regionType=ELEMENTS, activeInStep=False, 
+    includeStrain=False)
+    
+    
+#提交job分析
+print('job is started')
+mdb.Job(name='2kuang-fuban2-3', model='milling', description='', type=ANALYSIS, 
+    atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90, 
+    memoryUnits=PERCENTAGE, getMemoryFromAnalysis=True, 
+    explicitPrecision=SINGLE, nodalOutputPrecision=SINGLE, echoPrint=OFF, 
+    modelPrint=OFF, contactPrint=OFF, historyPrint=OFF, userSubroutine='', 
+    numCpus=16,numDomains=16, numGPUs=2)
+mdb.jobs['2kuang-fuban2-3'].submit(consistencyChecking=OFF)
+mdb.jobs['2kuang-fuban2-3'].waitForCompletion()
+print('job is done')
+
+
+import csv 
+from odbAccess import* 
+#csv文件格式是一种通用的电子表格和数据库导入导出格式    下列为提取变形数据
+odb=openOdb(path='2kuang-fuban2-3.odb')
+careregion=odb.rootAssembly.instances['WORKPIECE-1'].nodeSets['NODESET']
+#要大写！
+lastFrame=odb.steps['Step-1'].frames[-1]
+displacement=lastFrame.fieldOutputs['U']
+careDisplacement=displacement.getSubset(region=careregion)
+centerValues=careDisplacement.values
+x=[]
+y=[]
+z=[]
+num=[]
+for v in centerValues:
+    num.append(v.nodeLabel)
+    x.append(v.data[0])# 0 1 2 分别为x y z 方向变形值
+    y.append(v.data[1])
+    z.append(v.data[2])
+csvfile=open('D:/SIMULIA/2kuang-fuban2-3.csv','wb')
+writer = csv.writer(csvfile)
+title = ['Lable','X','Y','Z']
+#title.append('UX-')
+writer.writerow(title)
+#for v in centerValues:
+writer.writerow(num)
+writer.writerow(x)
+writer.writerow(y)
+writer.writerow(z)
+csvfile.close()
+print ('The displacement have been saved')
+​
